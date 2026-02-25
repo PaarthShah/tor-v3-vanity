@@ -4,7 +4,7 @@ A TOR v3 vanity url generator designed to run on an NVIDIA GPU.
 Disclaimer: This project is brand new and hasn't been thoroughly vetted.
 Please report any bugs you find [here](https://github.com/dr-bonez/tor-v3-vanity/issues).
 
-The program is designed to use all available cuda devices, and will automatically decide the number of threads and blocks to use.
+The program is designed to use all available CUDA devices, and will automatically decide the number of threads and blocks to use.
 
 Now supports multiple prefixes!
 
@@ -29,6 +29,25 @@ Now supports multiple prefixes!
   - `cd tor-v3-vanity`
   - `cargo +nightly build --release`
 - Or install the binary: `cargo +nightly install --path .`
+
+## Troubleshooting
+
+- **Build appears stuck at `tor-v3-vanity(build)`**
+  - The build script compiles the NVPTX kernel as a separate step.
+  - First build can take several minutes while toolchain artifacts are compiled.
+  - Run with `cargo +nightly build --release -vv` to see detailed progress.
+
+- **`linker rust-ptx-linker not found`**
+  - Do **not** install legacy `ptx-linker`.
+  - Ensure nightly components are installed:
+    - `rustup component add llvm-bitcode-linker llvm-tools rust-src --toolchain nightly`
+  - Re-run with nightly: `cargo +nightly build --release`.
+
+- **Nightly-only NVPTX errors**
+  - Confirm you are using nightly and the NVPTX target is installed:
+    - `rustup target add nvptx64-nvidia-cuda --toolchain nightly`
+  - Check active compiler:
+    - `rustc +nightly -V`
 
 ## Usage
 
