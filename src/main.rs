@@ -2,7 +2,8 @@ use std::path::PathBuf;
 use std::time::Duration;
 use std::time::Instant;
 
-use failure::Error;
+use anyhow::Result;
+use clap::Parser;
 use sha3::{Digest, Sha3_256};
 use tor_v3_vanity_core as core;
 
@@ -103,7 +104,7 @@ pub fn cuda_try_loop(
     prefixes: &[String],
     sender: crossbeam_channel::Sender<[u8; 32]>,
     tries_sender: crossbeam_channel::Sender<u64>,
-) -> Result<(), Error> {
+) -> Result<()> {
     use rustacuda::launch;
     use rustacuda::memory::DeviceBox;
     use rustacuda::prelude::*;
@@ -227,37 +228,24 @@ pub fn cuda_try_loop(
 
 const FILE_PREFIX: &'static [u8] = b"== ed25519v1-secret: type0 ==\0\0\0";
 
-fn main() {
-    let app = clap::App::new("t3v")
-        .arg(
-            clap::Arg::with_name("PREFIX")
-                .required(true)
-                .multiple(true)
-                .value_delimiter(",")
-                .help("Desired prefix"),
-        )
-        .arg(
-            clap::Arg::with_name("dst")
-                .long("dst")
-                .short("d")
-                .takes_value(true)
-                .help("Destination folder"),
-        );
-    let matches = app.get_matches();
+#[derive(clap::Parser)]
+#[command(name = "t3v")]
+struct Args {
+    /// Desired prefix (comma-separated for multiple)
+    #[arg(required = true, value_delimiter(','))]
+    prefix: Vec<String>,
 
-    let max_len = matches
-        .values_of("PREFIX")
-        .unwrap()
-        .fold(0, |acc, x| std::cmp::max(acc, x.len()));
-    let prefixes: Vec<_> = matches
-        .values_of("PREFIX")
-        .unwrap()
-        .map(|a| a.to_string())
-        .collect();
-    let dst = matches
-        .value_of("dst")
-        .map(PathBuf::from)
-        .unwrap_or_else(|| std::env::current_dir().unwrap());
+    /// Destination folder
+    #[arg(short, long)]
+    dst: Option<PathBuf>,
+}
+
+fn main() {
+    let args = Args::parse();
+
+    let max_len = args.prefix.iter().map(|s| s.len()).max().unwrap_or(0);
+    let prefixes: Vec<String> = args.prefix;
+    let dst = args.dst.unwrap_or_else(|| std::env::current_dir().unwrap());
     assert!(dst.is_dir(), "dst must be a directory");
 
     let (send, recv) = crossbeam_channel::unbounded();

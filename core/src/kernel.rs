@@ -22,7 +22,6 @@ fn add_u256(base: &[u8; 32], mut offset: u64) -> [u8; 32] {
 #[no_mangle]
 pub extern "ptx-kernel" fn render(params_ptr: *mut KernelParams) {
     use core::arch::nvptx::*;
-    use core::convert::TryInto;
 
     let params = unsafe { &mut *params_ptr };
     let x = unsafe { _block_dim_x() * _block_idx_x() + _thread_idx_x() } as u64;

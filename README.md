@@ -8,16 +8,27 @@ The program is designed to use all available cuda devices, and will automaticall
 
 Now supports multiple prefixes!
 
+## Compatibility
+
+- **Rust:** 2021 edition; stable or nightly (nightly required for CUDA build).
+- **CLI:** [clap](https://clap.rs) 4 with derive API.
+- **Errors:** [anyhow](https://github.com/dtolnay/anyhow) for application error handling.
+- **GPU target:** `nvptx64-nvidia-cuda`; kernel built with Rust’s **llvm-bitcode-linker** (no ptx-linker).
+
 ## Installation
 
 - [Install Rust](https://rustup.rs)
-- [Install Cuda](https://developer.nvidia.com/cuda-downloads)
-- `rustup install nightly`
-- `rustup target add nvptx64-nvidia-cuda`
-- `cargo install ptx-linker`
-- `git clone https://github.com/dr-bonez/tor-v3-vanity`
-- `cd tor-v3-vanity`
-- `cargo +nightly install --path .`
+- [Install CUDA](https://developer.nvidia.com/cuda-downloads)
+- Nightly and NVPTX target:
+  - `rustup install nightly`
+  - `rustup target add nvptx64-nvidia-cuda --toolchain nightly`
+- Nightly components (for building the GPU kernel; **no ptx-linker needed**):
+  - `rustup component add llvm-bitcode-linker llvm-tools rust-src --toolchain nightly`
+- Build:
+  - `git clone https://github.com/dr-bonez/tor-v3-vanity`
+  - `cd tor-v3-vanity`
+  - `cargo +nightly build --release`
+- Or install the binary: `cargo +nightly install --path .`
 
 ## Usage
 
