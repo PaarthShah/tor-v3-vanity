@@ -1,6 +1,6 @@
 [package]
 name = "tor-v3-vanity"
-version = "0.1.0"
+version = "0.2.0"
 edition = "2021"
 description = "A TOR v3 vanity url generator designed to run on an nvidia GPU."
 license = "MIT"
