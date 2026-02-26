@@ -4,3 +4,5 @@ target
 mykeys
 deb/package/usr/bin/t3v
 deb/amd64
+CLAUDE.md
+.claude/
