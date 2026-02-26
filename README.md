@@ -17,20 +17,24 @@ Now supports multiple prefixes!
 
 ## Installation
 
-- [Install Rust](https://rustup.rs)
+- [Install Rust](https://rustup.rs) (rustup)
 - [Install CUDA](https://developer.nvidia.com/cuda-downloads)
-- Nightly and NVPTX target:
-  - `rustup install nightly`
-  - `rustup target add nvptx64-nvidia-cuda --toolchain nightly`
-- Nightly components (for building the GPU kernel; **no ptx-linker needed**):
-  - `rustup component add llvm-bitcode-linker llvm-tools rust-src --toolchain nightly`
-- Build:
-  - `git clone https://github.com/dr-bonez/tor-v3-vanity`
-  - `cd tor-v3-vanity`
-  - `cargo +nightly build --release`
-- Or install the binary: `cargo +nightly install --path .`
+
+**One-time setup (reproducible on any machine).** Either:
+
+- **Makefile (recommended):** from `rust/`, run `make` — it runs setup then build. Or run `make setup` once, then `cargo +nightly build --release`.
+- **Manual:** run once:
+  ```bash
+  rustup install nightly && rustup target add nvptx64-nvidia-cuda --toolchain nightly && rustup component add llvm-bitcode-linker llvm-tools rust-src --toolchain nightly
+  ```
+  Then build: `cargo +nightly build --release` (from `rust/`).
+
+Or install the binary: `cargo +nightly install --path .` (from `rust/`).
 
 ## Troubleshooting
+
+- **`Cargo.lock does not exist` / `unable to build with the standard library` / `rust-src`**
+  - The build needs the nightly standard library source. Run the one-time setup from the Installation section (single line with `rustup install nightly && ... rust-src ...`), then `cargo +nightly build --release`.
 
 - **Build appears stuck at `tor-v3-vanity(build)`**
   - The build script compiles the NVPTX kernel as a separate step.
@@ -39,15 +43,10 @@ Now supports multiple prefixes!
 
 - **`linker rust-ptx-linker not found`**
   - Do **not** install legacy `ptx-linker`.
-  - Ensure nightly components are installed:
-    - `rustup component add llvm-bitcode-linker llvm-tools rust-src --toolchain nightly`
-  - Re-run with nightly: `cargo +nightly build --release`.
+  - Run the one-time setup (Installation section), then `cargo +nightly build --release`.
 
 - **Nightly-only NVPTX errors**
-  - Confirm you are using nightly and the NVPTX target is installed:
-    - `rustup target add nvptx64-nvidia-cuda --toolchain nightly`
-  - Check active compiler:
-    - `rustc +nightly -V`
+  - Run the one-time setup. Check active compiler: `rustc +nightly -V`.
 
 ## Usage
 
