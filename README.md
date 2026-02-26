@@ -18,7 +18,28 @@ Now supports multiple prefixes!
 ## Installation
 
 - [Install Rust](https://rustup.rs) (rustup)
-- [Install CUDA](https://developer.nvidia.com/cuda-downloads)
+- **CUDA** — required to build and run. See [CUDA install](https://developer.nvidia.com/cuda-downloads).
+
+### Why CUDA might be “missing” on the build machine
+
+- **Only the NVIDIA driver is installed** — the driver gives you `libcuda.so` at runtime, but on some distros the **CUDA toolkit** (libraries and headers for building) is a separate install. You need the toolkit (or at least the libs) to *build*.
+- **CUDA is in a non-default path** — e.g. installed under `/opt`, or from a package that puts libs in `/usr/lib/x86_64-linux-gnu`. Use `CUDA_LIB_DIR` or `CUDA_HOME` (see Troubleshooting).
+- **Different machine** — building on a machine without CUDA (e.g. CI or a laptop) will fail at link; build on a machine with CUDA, or install the CUDA toolkit there.
+
+### How to check CUDA is present
+
+- **Libraries (needed to build):**  
+  `ls /usr/local/cuda/lib64/libcuda.so` or `ls /usr/lib/x86_64-linux-gnu/libcuda.so`  
+  At least one should exist (or set `CUDA_LIB_DIR` to the directory that contains `libcuda.so`).
+- **Optional (for sanity):**  
+  `nvidia-smi` (driver/runtime) and/or `nvcc --version` (toolkit compiler).
+
+### How to install CUDA (if missing)
+
+- **Linux:** [NVIDIA CUDA download](https://developer.nvidia.com/cuda-downloads) — choose your distro and install the toolkit (or the “runfile” and select the libraries/development components).
+- **Ubuntu/Debian:** You can install the meta-package and libs, e.g.  
+  `sudo apt install nvidia-cuda-toolkit`  
+  (libs often end up in `/usr/lib/x86_64-linux-gnu`; the build will look there as a fallback.)
 
 **One-time setup (reproducible on any machine).** Either:
 
@@ -47,6 +68,10 @@ Or install the binary: `cargo +nightly install --path .` (from `rust/`).
 
 - **Nightly-only NVPTX errors**
   - Run the one-time setup. Check active compiler: `rustc +nightly -V`.
+
+- **`unable to find library -lcuda` / `-lcudart` / `-lcublas`**
+  - CUDA libraries are missing or not on the default path. See **Why CUDA might be “missing”** and **How to check / install CUDA** above.
+  - If CUDA is installed but in a different directory, set `CUDA_LIB_DIR` (path to the dir containing `libcuda.so`) or `CUDA_HOME` (CUDA root; build uses `$CUDA_HOME/lib64`). Example: `make CUDA_LIB_DIR=/usr/lib/x86_64-linux-gnu`
 
 ## Usage
 

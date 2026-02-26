@@ -9,8 +9,28 @@ use std::process::Command;
 /// One-time setup command to print when the kernel build fails (e.g. missing rust-src).
 const SETUP_CMD: &str = "rustup install nightly && rustup target add nvptx64-nvidia-cuda --toolchain nightly && rustup component add llvm-bitcode-linker llvm-tools rust-src --toolchain nightly";
 
+/// CUDA lib path: CUDA_LIB_DIR (exact), or CUDA_HOME/lib64 or CUDA_PATH/lib64, or default.
+fn cuda_lib_dir() -> String {
+    if let Ok(dir) = env::var("CUDA_LIB_DIR") {
+        println!("cargo:rerun-if-env-changed=CUDA_LIB_DIR");
+        return dir;
+    }
+    if let Ok(home) = env::var("CUDA_HOME") {
+        println!("cargo:rerun-if-env-changed=CUDA_HOME");
+        return format!("{}/lib64", home.trim_end_matches('/'));
+    }
+    if let Ok(path) = env::var("CUDA_PATH") {
+        println!("cargo:rerun-if-env-changed=CUDA_PATH");
+        return format!("{}/lib64", path.trim_end_matches('/'));
+    }
+    "/usr/local/cuda/lib64".into()
+}
+
 fn main() {
-    println!("cargo:rustc-link-search=native=/usr/local/cuda/lib64/");
+    let cuda_lib = cuda_lib_dir();
+    println!("cargo:rustc-link-search=native={}", cuda_lib);
+    // Fallback for distro-installed CUDA (e.g. Ubuntu nvidia-cuda-toolkit)
+    println!("cargo:rustc-link-search=native=/usr/lib/x86_64-linux-gnu");
     println!("cargo:rerun-if-changed=core");
     println!("cargo:rerun-if-env-changed=KERNEL_PTX_PATH");
 
