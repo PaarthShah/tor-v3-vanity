@@ -1,4 +1,7 @@
-# Linker for cross-compiling to aarch64 (e.g. make cross-arm64).
-# Install: apt install gcc-aarch64-linux-gnu
+# Linker for cross-compiling (make arm64 on amd64, or make amd64 on arm64).
+# Install: apt install gcc-aarch64-linux-gnu (for arm64) or gcc-x86-64-linux-gnu (for amd64)
 [target.aarch64-unknown-linux-gnu]
 linker = "aarch64-linux-gnu-gcc"
+
+[target.x86_64-unknown-linux-gnu]
+linker = "x86_64-linux-gnu-gcc"

@@ -7,9 +7,11 @@ CUDA_LIB_DIR ?= /usr/local/cuda/lib64
 CUDA_LIB_FALLBACK_X64 := /usr/lib/x86_64-linux-gnu
 CUDA_LIB_FALLBACK_ARM := /usr/lib/aarch64-linux-gnu
 AARCH64_CUDA_LIB_DIR ?= $(CURDIR)/cuda-arm64-libs
+X86_64_CUDA_LIB_DIR ?= $(CURDIR)/cuda-x86-64-libs
 AARCH64_GCC := $(firstword $(shell command -v aarch64-linux-gnu-gcc 2>/dev/null || command -v aarch64-linux-gnu-gcc-14 2>/dev/null || command -v aarch64-linux-gnu-gcc-13 2>/dev/null || echo ""))
+X86_64_GCC := $(firstword $(shell command -v x86_64-linux-gnu-gcc 2>/dev/null || command -v x86_64-linux-gnu-gcc-14 2>/dev/null || command -v x86_64-linux-gnu-gcc-13 2>/dev/null || echo ""))
 
-.PHONY: all setup amd64 arm64 install-cuda check-cuda setup-cross-arm64-deps fetch-aarch64-cuda-libs clean
+.PHONY: all setup amd64 arm64 install-cuda check-cuda setup-cross-arm64-deps fetch-aarch64-cuda-libs setup-cross-x86-64-deps fetch-x86-64-cuda-libs clean
 all: amd64
 
 # Install CUDA toolkit via apt (Debian/Ubuntu only). Run once if check-cuda fails.
@@ -42,10 +44,35 @@ check-cuda:
 		exit 1; \
 	fi
 
-# --- amd64 (native on x86_64) ---
-amd64: setup check-cuda
-	CARGO_TARGET_DIR=target/amd64 \
-	  cargo +nightly build --release --target x86_64-unknown-linux-gnu
+# --- amd64: native on x86_64, cross-compile when host is aarch64 ---
+setup-cross-x86-64-deps:
+	@$(CURDIR)/scripts/setup-cross-x86-64.sh
+
+fetch-x86-64-cuda-libs:
+	@$(CURDIR)/scripts/fetch-x86-64-cuda-libs.sh
+
+amd64: setup
+	@if [ "$(HOST_ARCH)" = "aarch64" ]; then \
+		$(MAKE) setup-cross-x86-64-deps; \
+		if [ -z "$(X86_64_GCC)" ]; then \
+			echo "x86_64 gcc not found. Run: ./scripts/setup-cross-x86-64.sh"; exit 1; \
+		fi; \
+		if [ ! -f "$(X86_64_CUDA_LIB_DIR)/libcuda.so" ] && [ ! -f "$(X86_64_CUDA_LIB_DIR)/libcuda.so.1" ]; then \
+			echo ""; \
+			echo "X86_64_CUDA_LIB_DIR ($(X86_64_CUDA_LIB_DIR)) must contain libcuda.so (x86_64)."; \
+			echo "  make fetch-x86-64-cuda-libs   then   FETCH_DRIVER=1 make fetch-x86-64-cuda-libs"; \
+			echo "  Or copy libcuda.so from an x86_64 machine. See docs/amd64-build.md"; \
+			echo ""; exit 1; \
+		fi; \
+		CARGO_TARGET_DIR=target/amd64 \
+		CARGO_TARGET_X86_64_UNKNOWN_LINUX_GNU_LINKER="$(X86_64_GCC)" \
+		X86_64_CUDA_LIB_DIR="$(X86_64_CUDA_LIB_DIR)" \
+		  cargo +nightly build --release --target x86_64-unknown-linux-gnu; \
+	else \
+		$(MAKE) check-cuda; \
+		CARGO_TARGET_DIR=target/amd64 \
+		  cargo +nightly build --release --target x86_64-unknown-linux-gnu; \
+	fi
 	mkdir -p $(DEB_DIR)/amd64
 	mv target/amd64/x86_64-unknown-linux-gnu/release/$(BINARY) $(DEB_DIR)/amd64/$(BINARY)
 	@echo "Binary: $(DEB_DIR)/amd64/$(BINARY)"

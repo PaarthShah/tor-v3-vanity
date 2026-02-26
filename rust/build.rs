@@ -10,12 +10,18 @@ use std::process::Command;
 const SETUP_CMD: &str = "rustup install nightly && rustup target add nvptx64-nvidia-cuda --toolchain nightly && rustup component add llvm-bitcode-linker llvm-tools rust-src --toolchain nightly";
 
 /// CUDA lib path: CUDA_LIB_DIR (exact), or CUDA_HOME/lib64 or CUDA_PATH/lib64, or default.
-/// For cross-compiling to aarch64, set AARCH64_CUDA_LIB_DIR to the dir containing aarch64 libs.
+/// For cross-compiling: AARCH64_CUDA_LIB_DIR (target aarch64), X86_64_CUDA_LIB_DIR (target x86_64 on aarch64 host).
 fn cuda_lib_dir() -> String {
     let target = env::var("TARGET").unwrap_or_default();
     if target.contains("aarch64") {
         if let Ok(dir) = env::var("AARCH64_CUDA_LIB_DIR") {
             println!("cargo:rerun-if-env-changed=AARCH64_CUDA_LIB_DIR");
+            return dir;
+        }
+    }
+    if target == "x86_64-unknown-linux-gnu" {
+        if let Ok(dir) = env::var("X86_64_CUDA_LIB_DIR") {
+            println!("cargo:rerun-if-env-changed=X86_64_CUDA_LIB_DIR");
             return dir;
         }
     }
