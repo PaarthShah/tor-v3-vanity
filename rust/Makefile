@@ -1,15 +1,18 @@
 BINARY := t3v
-# Output dir for binary (override for packaging: make DEB_DIR=/path x86_64)
-DEB_DIR ?= $(CURDIR)/../deb/amd64
+DEB_DIR ?= $(CURDIR)/../deb
+# Host arch for cross-compile detection (uname -m)
+HOST_ARCH := $(shell uname -m)
 
-# Where to look for CUDA libs (override if CUDA is elsewhere)
 CUDA_LIB_DIR ?= /usr/local/cuda/lib64
-CUDA_LIB_FALLBACK := /usr/lib/x86_64-linux-gnu
+CUDA_LIB_FALLBACK_X64 := /usr/lib/x86_64-linux-gnu
+CUDA_LIB_FALLBACK_ARM := /usr/lib/aarch64-linux-gnu
+AARCH64_CUDA_LIB_DIR ?= $(CURDIR)/cuda-arm64-libs
+AARCH64_GCC := $(firstword $(shell command -v aarch64-linux-gnu-gcc 2>/dev/null || command -v aarch64-linux-gnu-gcc-14 2>/dev/null || command -v aarch64-linux-gnu-gcc-13 2>/dev/null || echo ""))
 
-.PHONY: all setup check-cuda install-cuda x86_64 clean
-all: x86_64
+.PHONY: all setup amd64 arm64 install-cuda check-cuda setup-cross-arm64-deps fetch-aarch64-cuda-libs clean
+all: amd64
 
-# Install CUDA toolkit via apt (Debian/Ubuntu only; requires sudo). Run once if check-cuda fails.
+# Install CUDA toolkit via apt (Debian/Ubuntu only). Run once if check-cuda fails.
 install-cuda:
 	@if [ -f "/etc/debian_version" ] && command -v apt-get >/dev/null 2>&1; then \
 		echo "Installing CUDA toolkit (nvidia-cuda-toolkit) via apt..."; \
@@ -17,40 +20,68 @@ install-cuda:
 		echo "Done. Run: make check-cuda"; \
 	else \
 		echo "install-cuda is only for Debian/Ubuntu (apt)."; \
-		echo "On other distros install CUDA manually: https://developer.nvidia.com/cuda-downloads"; \
+		echo "On other distros: https://developer.nvidia.com/cuda-downloads"; \
 		exit 1; \
 	fi
 
-# Install nightly + NVPTX target + components if absent (idempotent). Required for PTX kernel build.
 setup:
 	@echo "Ensuring nightly toolchain and PTX build deps..."
 	rustup install nightly && \
 	rustup target add nvptx64-nvidia-cuda --toolchain nightly && \
 	rustup component add llvm-bitcode-linker llvm-tools rust-src --toolchain nightly
 
-# Fail early with clear instructions if CUDA libs are not found.
 check-cuda:
-	@if [ -f "$(CUDA_LIB_DIR)/libcuda.so" ] || [ -f "$(CUDA_LIB_FALLBACK)/libcuda.so" ]; then \
+	@FALLBACK="$(CUDA_LIB_FALLBACK_X64)"; [ "$(CUDA_ARCH)" = "arm64" ] && FALLBACK="$(CUDA_LIB_FALLBACK_ARM)"; \
+	if [ -f "$(CUDA_LIB_DIR)/libcuda.so" ] || [ -f "$$FALLBACK/libcuda.so" ]; then \
 		echo "CUDA libs found."; \
 	else \
 		echo ""; \
 		echo "CUDA libraries not found. Build will fail at link."; \
-		echo "  Checked: $(CUDA_LIB_DIR)/libcuda.so and $(CUDA_LIB_FALLBACK)/libcuda.so"; \
-		echo ""; \
-		echo "Install CUDA: make install-cuda  (Debian/Ubuntu; needs sudo)"; \
-		echo "  Or: https://developer.nvidia.com/cuda-downloads"; \
-		echo "  If CUDA is elsewhere: make CUDA_LIB_DIR=/path/to/dir"; \
+		echo "  make install-cuda  (Debian/Ubuntu)  or  CUDA_LIB_DIR=/path make amd64"; \
 		echo ""; \
 		exit 1; \
 	fi
 
-x86_64: setup check-cuda
-	# build into a temp area
-	CARGO_TARGET_DIR=target/x86_64 \
+# --- amd64 (native on x86_64) ---
+amd64: setup check-cuda
+	CARGO_TARGET_DIR=target/amd64 \
 	  cargo +nightly build --release --target x86_64-unknown-linux-gnu
-	mkdir -p $(DEB_DIR)
-	# move only the binary into the deb folder
-	mv target/x86_64/x86_64-unknown-linux-gnu/release/$(BINARY) $(DEB_DIR)/$(BINARY)
+	mkdir -p $(DEB_DIR)/amd64
+	mv target/amd64/x86_64-unknown-linux-gnu/release/$(BINARY) $(DEB_DIR)/amd64/$(BINARY)
+	@echo "Binary: $(DEB_DIR)/amd64/$(BINARY)"
+
+# --- arm64: native on aarch64, cross-compile when host is amd64 ---
+setup-cross-arm64-deps:
+	@$(CURDIR)/scripts/setup-cross-arm64.sh
+
+fetch-aarch64-cuda-libs:
+	@$(CURDIR)/scripts/fetch-aarch64-cuda-libs.sh
+
+arm64: setup
+	rustup target add aarch64-unknown-linux-gnu --toolchain nightly
+	@if [ "$(HOST_ARCH)" = "aarch64" ]; then \
+		$(MAKE) check-cuda CUDA_ARCH=arm64; \
+		CARGO_TARGET_DIR=target/arm64 cargo +nightly build --release --target aarch64-unknown-linux-gnu; \
+	else \
+		$(MAKE) setup-cross-arm64-deps; \
+		if [ -z "$(AARCH64_GCC)" ]; then \
+			echo "aarch64 gcc not found. Run: ./scripts/setup-cross-arm64.sh"; exit 1; \
+		fi; \
+		if [ ! -f "$(AARCH64_CUDA_LIB_DIR)/libcuda.so" ] && [ ! -f "$(AARCH64_CUDA_LIB_DIR)/libcuda.so.1" ]; then \
+			echo ""; \
+			echo "AARCH64_CUDA_LIB_DIR ($(AARCH64_CUDA_LIB_DIR)) must contain libcuda.so (aarch64)."; \
+			echo "  make fetch-aarch64-cuda-libs   then   FETCH_DRIVER=1 make fetch-aarch64-cuda-libs"; \
+			echo "  Or copy libcuda.so from an arm64 machine. See docs/arm64-build.md"; \
+			echo ""; exit 1; \
+		fi; \
+		CARGO_TARGET_DIR=target/arm64 \
+		CARGO_TARGET_AARCH64_UNKNOWN_LINUX_GNU_LINKER="$(AARCH64_GCC)" \
+		AARCH64_CUDA_LIB_DIR="$(AARCH64_CUDA_LIB_DIR)" \
+		  cargo +nightly build --release --target aarch64-unknown-linux-gnu; \
+	fi
+	mkdir -p $(DEB_DIR)/arm64
+	mv target/arm64/aarch64-unknown-linux-gnu/release/$(BINARY) $(DEB_DIR)/arm64/$(BINARY)
+	@echo "Binary: $(DEB_DIR)/arm64/$(BINARY)"
 
 clean:
-	rm -rf target $(DEB_DIR)/$(BINARY)
+	rm -rf target $(DEB_DIR)/amd64/$(BINARY) $(DEB_DIR)/arm64/$(BINARY)

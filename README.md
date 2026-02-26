@@ -52,6 +52,8 @@ Now supports multiple prefixes!
 
 Or install the binary: `cargo +nightly install --path .` (from `rust/`).
 
+**ARM64 (aarch64):** `make arm64`. On an ARM64 host this builds natively; on an amd64 host it cross-compiles (run `make fetch-aarch64-cuda-libs` first, optionally `FETCH_DRIVER=1` for libcuda). See [docs/arm64-build.md](docs/arm64-build.md).
+
 ## Troubleshooting
 
 - **`Cargo.lock does not exist` / `unable to build with the standard library` / `rust-src`**

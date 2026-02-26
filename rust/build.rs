@@ -10,7 +10,15 @@ use std::process::Command;
 const SETUP_CMD: &str = "rustup install nightly && rustup target add nvptx64-nvidia-cuda --toolchain nightly && rustup component add llvm-bitcode-linker llvm-tools rust-src --toolchain nightly";
 
 /// CUDA lib path: CUDA_LIB_DIR (exact), or CUDA_HOME/lib64 or CUDA_PATH/lib64, or default.
+/// For cross-compiling to aarch64, set AARCH64_CUDA_LIB_DIR to the dir containing aarch64 libs.
 fn cuda_lib_dir() -> String {
+    let target = env::var("TARGET").unwrap_or_default();
+    if target.contains("aarch64") {
+        if let Ok(dir) = env::var("AARCH64_CUDA_LIB_DIR") {
+            println!("cargo:rerun-if-env-changed=AARCH64_CUDA_LIB_DIR");
+            return dir;
+        }
+    }
     if let Ok(dir) = env::var("CUDA_LIB_DIR") {
         println!("cargo:rerun-if-env-changed=CUDA_LIB_DIR");
         return dir;
@@ -29,8 +37,13 @@ fn cuda_lib_dir() -> String {
 fn main() {
     let cuda_lib = cuda_lib_dir();
     println!("cargo:rustc-link-search=native={}", cuda_lib);
-    // Fallback for distro-installed CUDA (e.g. Ubuntu nvidia-cuda-toolkit)
-    println!("cargo:rustc-link-search=native=/usr/lib/x86_64-linux-gnu");
+    // Fallback for distro-installed CUDA by host arch
+    let target = env::var("TARGET").unwrap_or_default();
+    if target.contains("aarch64") {
+        println!("cargo:rustc-link-search=native=/usr/lib/aarch64-linux-gnu");
+    } else {
+        println!("cargo:rustc-link-search=native=/usr/lib/x86_64-linux-gnu");
+    }
     println!("cargo:rerun-if-changed=core");
     println!("cargo:rerun-if-env-changed=KERNEL_PTX_PATH");
 

@@ -1,8 +1,9 @@
 rust/target
+rust/cuda-arm64-libs
 target
 *.onion
 mykeys
 deb/package/usr/bin/t3v
-deb/amd64
+deb/
 CLAUDE.md
 .claude/
