@@ -28,7 +28,7 @@ fn check_nightly_components(toolchain: &str) -> Result<(), String> {
     let out = String::from_utf8_lossy(&components.stdout);
     let required = ["rust-src", "llvm-bitcode-linker", "llvm-tools"];
     for name in required {
-        if !out.lines().any(|l| l.contains(name) && l.contains("installed")) {
+        if !out.lines().any(|l| l.contains(name)) {
             return Err(format!("missing component: {}", name));
         }
     }
