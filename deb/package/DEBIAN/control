@@ -1,0 +1,6 @@
+Package: t3v
+Version: 0.1.0
+Maintainer: Server Man
+Architecture: amd64
+Description: Tor v3 vanity .onion address generator using NVIDIA CUDA GPUs
+Source: tor-v3-vanity
