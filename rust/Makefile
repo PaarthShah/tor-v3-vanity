@@ -5,8 +5,9 @@ DEB_DIR ?= $(CURDIR)/../deb/amd64
 .PHONY: all setup x86_64 clean
 all: x86_64
 
-# One-time toolchain setup (idempotent). Required for PTX kernel build.
+# Install nightly + NVPTX target + components if absent (idempotent). Required for PTX kernel build.
 setup:
+	@echo "Ensuring nightly toolchain and PTX build deps..."
 	rustup install nightly && \
 	rustup target add nvptx64-nvidia-cuda --toolchain nightly && \
 	rustup component add llvm-bitcode-linker llvm-tools rust-src --toolchain nightly
