@@ -12,3 +12,18 @@ docs/junior-rust-manual.md
 mdpdf.log
 .venv-pdf/
 docs/junior-rust-manual.pdf
+
+# ===== AI Tools =====
+.claude/
+.claude_memory
+.cursorrules
+.cursor/
+.aider*
+.copilot/
+CLAUDE.md
+AGENTS.md
+.github/copilot-instructions.md
+
+# ===== AI / Design Plans =====
+docs/plans/
+plans/
