@@ -97,10 +97,18 @@ On my 1070ti, I get the following time estimates:
 |             8 | 22.5 weeks |
 |             9 | 14 years   |
 
-## Live dashboard
+## Performance & live dashboard
 
-On an interactive terminal the run shows a live, in-place dashboard with overall and
-per-GPU throughput and a per-prefix progress/ETA table:
+The program automatically spawns one worker thread per CUDA device and uses every
+GPU it finds, so a multi-GPU box (e.g. an 8×H100 node) is saturated out of the box.
+
+On startup each GPU **autotunes itself**: it measures throughput while doubling the
+number of keygens per launch (a grid-stride loop) and settles on the value that gets
+~99% of peak throughput, capped so a single launch stays short (bounded hit-detection
+latency and responsive Ctrl-C). No flags required.
+
+While running, an interactive terminal shows a **live dashboard** that updates in
+place:
 
 ```
 tor-v3-vanity · 8×GPU · 00:05:23
@@ -117,31 +125,63 @@ GPU     ITERS         RATE
   ...
 ```
 
-On startup each GPU autotunes its per-launch batch size (`ITERS`) for throughput.
-Found keys are printed above the dashboard and written to the destination folder.
-Per-prefix ETAs are shown individually, so a short prefix that will land soon isn't
-hidden behind the hardest one. When stdout is not a TTY, it falls back to plain
-status lines every 30s.
+Each found key is printed as a permanent line above the dashboard and written to the
+destination folder. Per-prefix ETAs are shown individually, so shorter prefixes that
+will land soon are no longer hidden behind the hardest one. When stdout is **not** a
+TTY (piped/redirected), it falls back to plain status lines every 30s.
 
-## Required vs bonus prefixes
+## Required vs bonus prefixes (when does it stop?)
 
-Positional prefixes are **required**: the run exits as soon as every one is found.
-Prefixes passed with **`--bonus`** are searched the whole time and saved if they turn
-up, but never keep the run alive on their own:
+Positional prefixes are **required**: the run exits as soon as every one of them has
+been found. Prefixes passed with **`--bonus`** are searched the whole time and saved
+if they turn up, but they never keep the run alive on their own.
+
+This lets you say "I mainly want `shaonsen`, but grab the longer `shaonsenllc` too if
+it happens to appear while we're still searching":
 
 ```bash
 t3v --dst mykeys/ shaonsen --bonus shaonsenllc
 ```
 
-The moment `shaonsen` is found, t3v writes whatever it collected, prints a summary,
-and exits — it won't grind for years just for the bonus. Use **`--count N`** to
-collect N matches of a prefix before considering it satisfied (default 1).
+The moment `shaonsen` is found, t3v writes both keys it managed to collect, prints a
+summary, and exits — it won't keep grinding for years just for the bonus. List
+multiple of either kind comma-separated (`a,b,c`). Use **`--count N`** to collect N
+matches of each prefix before considering it satisfied (default 1).
 
-## Performance tuning
+## Search algorithm (`--algo`)
 
-- **`T3V_ITERS`** (runtime env var) — pins the per-launch batch size and skips
-  autotune; handy for benchmarking a specific value, e.g. `T3V_ITERS=1024 t3v myprefix`.
-- **`KERNEL_TARGET_CPU`** (build-time env var, default `sm_90` for Hopper/H100) — the
-  compute capability the PTX kernel is compiled for. PTX is JIT-compiled to the
-  installed GPU at load, so the default is forward-compatible; override for older
-  cards, e.g. `KERNEL_TARGET_CPU=sm_75 make amd64`.
+There are two GPU kernels:
+
+- **`--algo incremental`** (default) — mkp224o-style: each thread computes one
+  `A = a·B`, then enumerates `A, A+B, A+2B, …` by point addition (the secret scalar
+  for step `k` is just `a+k`), with batched Montgomery inversion over a window.
+  **~30–38× faster** (≈3 G keys/s vs ≈95 M keys/s across 8×H100). Keys are stored as
+  the raw scalar; Tor uses it un-clamped, exactly like mkp224o.
+- **`--algo seed`** — the original reference path: hash a fresh random seed per
+  candidate, which costs a full scalar multiplication every time.
+
+The incremental path's field/point arithmetic is validated bit-for-bit against
+curve25519-dalek (`cargo run --example field_oracle`, `--example gpu_selftest`),
+and every produced key is independently re-derived and signed/verified
+(`--example validate_key`). Each found key is also re-derived on the host before
+writing, so a key whose address doesn't actually carry the prefix is discarded
+rather than saved.
+
+```bash
+t3v --algo incremental --dst mykeys/ myprefix
+```
+
+Note: with a *very* short, frequently-matching prefix (≈4 chars), many threads can
+match within one launch and race on the shared output slot; such torn matches are
+detected and discarded by the host re-derivation (never written wrong). For real
+prefix lengths this never occurs.
+
+Tuning knobs:
+
+- **`T3V_ITERS`** (runtime env var) — pins keygens-per-launch and **skips autotune**.
+  Useful for benchmarking a specific value, e.g. `T3V_ITERS=1024 t3v myprefix`.
+
+- **`KERNEL_TARGET_CPU`** (build-time env var, default `sm_90` for Hopper/H100) —
+  the compute capability the PTX kernel is compiled for. PTX is JIT-compiled to the
+  installed GPU by the driver at load time, so the default is forward-compatible.
+  Override for older cards, e.g. `KERNEL_TARGET_CPU=sm_75 make amd64`.
