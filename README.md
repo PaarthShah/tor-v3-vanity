@@ -100,18 +100,18 @@ On my 1070ti, I get the following time estimates:
 ### 8× H100, incremental algorithm
 
 Measured on an 8×H100 node with `--algo incremental` (the default): roughly
-**7 G keys/s** (≈0.9 G/s per H100) — about **75×** the original seed kernel, which does
-~95 M keys/s on the same box. Expected (mean) time to land a prefix:
+**19 G keys/s** (≈2.4 G/s per H100) — about **200×** the original seed kernel, which
+does ~95 M keys/s on the same box. Expected (mean) time to land a prefix:
 
 | Prefix Length | Expected time |
 | ------------- | ------------- |
 |             6 | < 1 second    |
-|             7 | ~5 seconds    |
-|             8 | ~2.5 minutes  |
-|             9 | ~1.5 hours    |
-|            10 | ~2 days       |
-|            11 | ~2 months     |
-|            12 | ~5 years      |
+|             7 | ~2 seconds    |
+|             8 | ~1 minute     |
+|             9 | ~30 minutes   |
+|            10 | ~16 hours     |
+|            11 | ~22 days      |
+|            12 | ~2 years      |
 
 Throughput scales with GPU count and varies with contention; each extra character is
 32× the work.
@@ -130,17 +130,17 @@ While running, an interactive terminal shows a **live dashboard** that updates i
 place:
 
 ```
-tor-v3-vanity · 8×GPU · 00:13:29
-6.14 T keys · 7.47 G/s (avg 7.59 G/s)
+tor-v3-vanity · 8×GPU · 00:01:11
+1.35 T keys · 19.21 G/s (avg 19.04 G/s)
 
 PREFIX                  FOUND     PROGRESS       ETA
-shaonsenllc               0/1       0.017%     54.9d
-paarthshah                0/1       0.546%     41.0h
+shaonsenllc               0/1       0.004%     21.9d
+paarthshah                0/1       0.120%     16.4h
 
 GPU     ITERS         RATE
-  0      8192   970.73 M/s
-  1      8192   888.17 M/s
-  2      8192   888.19 M/s
+  0      8192     2.36 G/s
+  1      8192     2.37 G/s
+  2      8192     2.50 G/s
   ...
 ```
 
@@ -174,8 +174,8 @@ There are two GPU kernels:
 - **`--algo incremental`** (default) — each thread computes one `A = a·B`, then
   enumerates `A, A+B, A+2B, …` by point addition (the secret scalar for step `k` is
   just `a+k`), with batched Montgomery inversion over a window.
-  **~75× faster** (≈7 G keys/s vs ≈95 M keys/s across 8×H100). Keys are stored as the
-  raw scalar; Tor uses it un-clamped.
+  **~200× faster** (≈19 G keys/s vs ≈95 M keys/s across 8×H100). Keys are stored as
+  the raw scalar; Tor uses it un-clamped.
 - **`--algo seed`** — the original reference path: hash a fresh random seed per
   candidate, which costs a full scalar multiplication every time.
 
