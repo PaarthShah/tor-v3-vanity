@@ -134,8 +134,8 @@ tor-v3-vanity · 8×GPU · 00:13:29
 6.14 T keys · 7.47 G/s (avg 7.59 G/s)
 
 PREFIX                  FOUND     PROGRESS       ETA
-qm4xkv27dhz               0/1       0.017%     54.9d
-tz7npq4ksb                0/1       0.546%     41.0h
+shaonsenllc               0/1       0.017%     54.9d
+paarthshah                0/1       0.546%     41.0h
 
 GPU     ITERS         RATE
   0      8192   970.73 M/s
