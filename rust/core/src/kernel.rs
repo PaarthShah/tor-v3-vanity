@@ -197,7 +197,37 @@ fn fe_mul(a: &Fe, b: &Fe) -> Fe {
 }
 
 fn fe_sq(a: &Fe) -> Fe {
-    fe_mul(a, a)
+    // Dedicated squaring: fewer cross terms than fe_mul(a, a).
+    let a0 = a[0] as u128;
+    let a1 = a[1] as u128;
+    let a2 = a[2] as u128;
+    let a3 = a[3] as u128;
+    let a4 = a[4] as u128;
+    let a3_19 = 19 * a3;
+    let a4_19 = 19 * a4;
+
+    let c0 = a0 * a0 + 2 * (a1 * a4_19 + a2 * a3_19);
+    let c1 = a3 * a3_19 + 2 * (a0 * a1 + a2 * a4_19);
+    let c2 = a1 * a1 + 2 * (a0 * a2 + a4 * a3_19);
+    let c3 = a4 * a4_19 + 2 * (a0 * a3 + a1 * a2);
+    let c4 = a2 * a2 + 2 * (a0 * a4 + a1 * a3);
+
+    let m = (1u128 << 51) - 1;
+    let c1 = c1 + (c0 >> 51);
+    let r0 = (c0 & m) as u64;
+    let c2 = c2 + (c1 >> 51);
+    let r1 = (c1 & m) as u64;
+    let c3 = c3 + (c2 >> 51);
+    let r2 = (c2 & m) as u64;
+    let c4 = c4 + (c3 >> 51);
+    let r3 = (c3 & m) as u64;
+    let carry = (c4 >> 51) as u64;
+    let r4 = (c4 & m) as u64;
+
+    let mut r0 = r0 + carry * 19;
+    let r1 = r1 + (r0 >> 51);
+    r0 &= FE_MASK;
+    [r0, r1, r2, r3, r4]
 }
 
 fn fe_pow2k(a: &Fe, k: u32) -> Fe {
@@ -306,6 +336,35 @@ fn pt_add(p: &Pt, q: &Pt) -> Pt {
     }
 }
 
+/// Basepoint terms that are constant across the whole walk: (B.y-B.x), (B.y+B.x),
+/// and B.t*2d. Computed once per thread, reused by every `+B` step.
+fn base_cached() -> (Fe, Fe, Fe) {
+    (
+        fe_sub(&BASEPOINT.y, &BASEPOINT.x),
+        fe_add(&BASEPOINT.y, &BASEPOINT.x),
+        fe_mul(&BASEPOINT.t, &EDWARDS_D2),
+    )
+}
+
+/// p + B using the precomputed base terms. Same as pt_add(p, B) but skips the
+/// constant recomputation and the multiply by B.z (= 1): 7 muls instead of 9.
+fn pt_add_base(p: &Pt, b_sub: &Fe, b_add: &Fe, b_d2t: &Fe) -> Pt {
+    let a = fe_mul(&fe_sub(&p.y, &p.x), b_sub);
+    let b = fe_mul(&fe_add(&p.y, &p.x), b_add);
+    let c = fe_mul(&p.t, b_d2t);
+    let d = fe_add(&p.z, &p.z); // 2 * p.z * B.z, and B.z = 1
+    let e = fe_sub(&b, &a);
+    let f = fe_sub(&d, &c);
+    let g = fe_add(&d, &c);
+    let h = fe_add(&b, &a);
+    Pt {
+        x: fe_mul(&e, &f),
+        y: fe_mul(&g, &h),
+        t: fe_mul(&e, &h),
+        z: fe_mul(&f, &g),
+    }
+}
+
 fn scalar_mul_base(scalar: &[u8; 32]) -> Pt {
     let mut r = IDENTITY;
     let mut i: i32 = 255;
@@ -365,6 +424,7 @@ pub extern "ptx-kernel" fn render_incremental(params_ptr: *mut KernelParams) {
     // A = (base + offset)·B, computed once; thereafter only point additions.
     let a_bytes = add_u256(base, offset);
     let mut p = scalar_mul_base(&a_bytes);
+    let (b_sub, b_add, b_d2t) = base_cached();
 
     let byte_prefixes = unsafe {
         core::slice::from_raw_parts_mut(params.byte_prefixes.as_raw_mut(), params.byte_prefixes_len)
@@ -372,7 +432,7 @@ pub extern "ptx-kernel" fn render_incremental(params_ptr: *mut KernelParams) {
 
     // Walk in windows of WINDOW, one batched inversion per window. Only Y,Z are
     // needed: the prefix lives in the low bytes of affine y (host re-derives the key).
-    const WINDOW: usize = 8;
+    const WINDOW: usize = 32;
     let mut ys = [[0u64; 5]; WINDOW];
     let mut zs = [[0u64; 5]; WINDOW];
     let mut scratch = [[0u64; 5]; WINDOW];
@@ -391,7 +451,7 @@ pub extern "ptx-kernel" fn render_incremental(params_ptr: *mut KernelParams) {
         while i < w {
             ys[i] = p.y;
             zs[i] = p.z;
-            p = pt_add(&p, &BASEPOINT);
+            p = pt_add_base(&p, &b_sub, &b_add, &b_d2t);
             i += 1;
         }
 
@@ -432,9 +492,10 @@ pub extern "ptx-kernel" fn selftest(params_ptr: *mut KernelParams) {
     // Walk params.iters steps from base·B, mirroring render_incremental, so the
     // host can check the walk lands on (base + iters)·B.
     let mut p = scalar_mul_base(base);
+    let (b_sub, b_add, b_d2t) = base_cached();
     let mut step: u64 = 0;
     while step < params.iters {
-        p = pt_add(&p, &BASEPOINT);
+        p = pt_add_base(&p, &b_sub, &b_add, &b_d2t);
         step += 1;
     }
     let c = compress(&p);
