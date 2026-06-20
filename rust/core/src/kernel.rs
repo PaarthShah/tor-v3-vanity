@@ -240,6 +240,7 @@ fn fe_pow2k(a: &Fe, k: u32) -> Fe {
     r
 }
 
+#[inline(always)]
 fn fe_invert(z: &Fe) -> Fe {
     let t0 = fe_sq(z);
     let t1 = fe_sq(&fe_sq(&t0));
@@ -319,6 +320,7 @@ fn fe_to_bytes(f: &Fe) -> [u8; 32] {
     s
 }
 
+#[inline(always)]
 fn pt_add(p: &Pt, q: &Pt) -> Pt {
     let a = fe_mul(&fe_sub(&p.y, &p.x), &fe_sub(&q.y, &q.x));
     let b = fe_mul(&fe_add(&p.y, &p.x), &fe_add(&q.y, &q.x));

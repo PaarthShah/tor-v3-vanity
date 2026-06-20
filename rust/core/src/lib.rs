@@ -32,11 +32,18 @@ impl BytePrefix {
     /// `last_byte_idx` is the number of fully-constrained leading bytes; when the
     /// prefix doesn't end on a byte boundary, `last_byte_mask` constrains the high
     /// bits of the next byte (mask 0 = byte-aligned prefix, no partial byte).
+    #[inline(always)]
     pub fn matches(&self, data: &[u8]) -> bool {
         let slice =
             unsafe { core::slice::from_raw_parts(self.byte_prefix.as_raw(), self.byte_prefix_len) };
-        if !data.starts_with(&slice[..self.last_byte_idx]) {
-            return false;
+        // Manual byte compare instead of `data.starts_with(..)`, which lowers to a
+        // memcmp call — too costly per candidate in the GPU hot loop.
+        let mut i = 0;
+        while i < self.last_byte_idx {
+            if data[i] != slice[i] {
+                return false;
+            }
+            i += 1;
         }
         self.last_byte_mask == 0
             || data[self.last_byte_idx] & self.last_byte_mask == slice[self.last_byte_idx]
