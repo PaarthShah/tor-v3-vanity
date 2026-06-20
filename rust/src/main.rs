@@ -1,40 +1,14 @@
+use std::fmt::Write as _;
+use std::io::{IsTerminal, Write};
 use std::path::PathBuf;
-use std::time::Duration;
-use std::time::Instant;
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
+use std::sync::Arc;
+use std::time::{Duration, Instant};
 
 use anyhow::Result;
 use clap::Parser;
 use sha3::{Digest, Sha3_256};
 use tor_v3_vanity_core as core;
-
-pub struct Pubkey(pub [u8; 32]);
-impl AsRef<[u8; 32]> for Pubkey {
-    fn as_ref(&self) -> &[u8; 32] {
-        &self.0
-    }
-}
-
-pub struct PrettyDur(chrono::Duration);
-impl std::fmt::Display for PrettyDur {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        if self.0.num_weeks() >= 52 {
-            write!(f, "{} years, ", self.0.num_weeks() / 52)?;
-        }
-        if self.0.num_weeks() % 52 > 0 {
-            write!(f, "{} weeks, ", self.0.num_weeks() % 52)?;
-        }
-        if self.0.num_days() % 7 > 0 {
-            write!(f, "{} days, ", self.0.num_days() % 7)?;
-        }
-        if self.0.num_hours() % 24 > 0 {
-            write!(f, "{} hours, ", self.0.num_hours() % 24)?;
-        }
-        if self.0.num_minutes() % 60 > 0 {
-            write!(f, "{} minutes, ", self.0.num_minutes() % 60)?;
-        }
-        write!(f, "{} seconds", self.0.num_seconds() % 60)
-    }
-}
 
 pub fn pubkey_to_onion(pubkey: &[u8; 32]) -> String {
     let mut hasher = Sha3_256::new();
@@ -100,25 +74,56 @@ fn assert_crypto_rng<Rng: rand::CryptoRng>(rng: Rng) -> Rng {
     rng
 }
 
-pub fn cuda_try_loop(
-    prefixes: &[String],
-    sender: crossbeam_channel::Sender<[u8; 32]>,
-    tries_sender: crossbeam_channel::Sender<u64>,
+/// Lock-free telemetry shared between the GPU workers and the reporter.
+struct DeviceStat {
+    keys: AtomicU64,
+}
+
+struct Shared {
+    start: Instant,
+    prefixes: Vec<String>,
+    /// Per-prefix: true if required (must be found to finish), false if bonus.
+    required: Vec<bool>,
+    /// Matches to collect per prefix before it's considered satisfied.
+    target: u64,
+    found: Vec<AtomicU64>,
+    devices: Vec<DeviceStat>,
+    /// Set once all required prefixes are satisfied; tells the reporter to finalize.
+    done: AtomicBool,
+}
+
+impl Shared {
+    fn total_keys(&self) -> u64 {
+        self.devices
+            .iter()
+            .map(|d| d.keys.load(Ordering::Relaxed))
+            .sum()
+    }
+
+    fn satisfied(&self, i: usize) -> bool {
+        self.found[i].load(Ordering::Relaxed) >= self.target
+    }
+
+    fn required_satisfied(&self) -> bool {
+        (0..self.prefixes.len()).all(|i| !self.required[i] || self.satisfied(i))
+    }
+}
+
+/// Spawn one worker thread per CUDA device, each looping forever generating keys.
+fn cuda_try_loop(
+    shared: Arc<Shared>,
+    found_tx: crossbeam_channel::Sender<(usize, [u8; 32])>,
 ) -> Result<()> {
     use rustacuda::launch;
     use rustacuda::memory::DeviceBox;
     use rustacuda::prelude::*;
     use std::ffi::CString;
 
-    // Create a context associated to this device
-    // TODO: keep alive
-    rustacuda::init(CudaFlags::empty())?;
-    let mut i = 0;
-    for device in rustacuda::device::Device::devices()? {
+    for (i, device) in rustacuda::device::Device::devices()?.enumerate() {
         let device = device?;
-        let prefixes = prefixes.to_owned();
-        let sender = sender.clone();
-        let tries_sender = tries_sender.clone();
+        let prefixes = shared.prefixes.clone();
+        let found_tx = found_tx.clone();
+        let shared = shared.clone();
         std::thread::spawn(move || {
             use rand::RngCore;
             let mut csprng = assert_crypto_rng(rand::thread_rng());
@@ -126,31 +131,27 @@ pub fn cuda_try_loop(
                 Context::create_and_push(ContextFlags::MAP_HOST | ContextFlags::SCHED_AUTO, device)
                     .unwrap();
 
-            // Load PTX module
             let module_data = CString::new(include_str!(env!("KERNEL_PTX_PATH"))).unwrap();
             let kernel = Module::load_from_string(&module_data).unwrap();
             let function = kernel
                 .get_function(std::ffi::CStr::from_bytes_with_nul(b"render\0").unwrap())
                 .unwrap();
 
-            // Create a stream to submit work to
             let stream = Stream::new(StreamFlags::NON_BLOCKING, None).unwrap();
 
-            // Move seed and prefix to device
             let mut seed = [0; 32];
             let mut gpu_seed = DeviceBuffer::from_slice(&seed).unwrap();
 
             let mut byte_prefixes_owned: Vec<_> = prefixes
-                .into_iter()
-                .map(|a| BytePrefixOwned::from_str(&a))
+                .iter()
+                .map(|a| BytePrefixOwned::from_str(a))
                 .collect();
-            let mut byte_prefixes: Vec<_> = byte_prefixes_owned
+            let byte_prefixes: Vec<_> = byte_prefixes_owned
                 .iter_mut()
                 .map(|bp| bp.as_byte_prefix())
                 .collect();
             let mut gpu_byte_prefixes = DeviceBuffer::from_slice(&byte_prefixes).unwrap();
 
-            // Crate parameters
             let mut params = DeviceBox::new(&core::KernelParams {
                 seed: gpu_seed.as_device_ptr(),
                 byte_prefixes: gpu_byte_prefixes.as_device_ptr(),
@@ -158,7 +159,7 @@ pub fn cuda_try_loop(
             })
             .unwrap();
 
-            // calculate threads and blocks
+            // Block size from an occupancy/register heuristic.
             let fn_max_threads = function
                 .get_attribute(rustacuda::function::FunctionAttribute::MaxThreadsPerBlock)
                 .unwrap() as u32;
@@ -178,18 +179,15 @@ pub fn cuda_try_loop(
             let threads = *[
                 fn_max_threads,
                 gpu_max_threads,
-                gpu_max_registers / fn_registers,
+                gpu_max_registers / fn_registers.max(1),
             ]
             .iter()
             .min()
             .unwrap();
             let blocks = gpu_cores * gpu_max_threads / threads;
+            let keys_per_launch = threads as u64 * blocks as u64;
 
-            println!(
-                "Launching kernel on device #{} with {} threads and {} blocks",
-                i, threads, blocks
-            );
-
+            let stat = &shared.devices[i];
             loop {
                 csprng.fill_bytes(&mut seed);
                 gpu_seed.copy_from(&seed).unwrap();
@@ -197,31 +195,22 @@ pub fn cuda_try_loop(
                     launch!(kernel.render<<<blocks, threads, 0, stream>>>(params.as_device_ptr()))
                         .unwrap();
                 }
-
-                // The kernel launch is asynchronous, so we wait for the kernel to finish executing
                 stream.synchronize().unwrap();
 
-                gpu_byte_prefixes.copy_to(&mut byte_prefixes).unwrap();
-
-                for prefix in &mut byte_prefixes_owned {
+                for (idx, prefix) in byte_prefixes_owned.iter_mut().enumerate() {
                     let mut success = false;
                     prefix.success.copy_to(&mut success).unwrap();
                     if success {
                         prefix.success.copy_from(&false).unwrap();
                         let mut out = [0; 32];
                         prefix.out.copy_to(&mut out).unwrap();
-                        sender.send(out).unwrap();
+                        found_tx.send((idx, out)).unwrap();
                     }
                 }
 
-                tries_sender.send(threads as u64 * blocks as u64).unwrap();
+                stat.keys.fetch_add(keys_per_launch, Ordering::Relaxed);
             }
         });
-        i += 1;
-    }
-    if i == 0 {
-        eprintln!("No cuda devices available.");
-        std::process::exit(2);
     }
     Ok(())
 }
@@ -231,65 +220,373 @@ const FILE_PREFIX: &'static [u8] = b"== ed25519v1-secret: type0 ==\0\0\0";
 #[derive(clap::Parser)]
 #[command(name = "t3v")]
 struct Args {
-    /// Desired prefix (comma-separated for multiple)
+    /// Required prefix(es) (comma-separated). The run exits once all are found.
     #[arg(required = true, value_delimiter(','))]
     prefix: Vec<String>,
 
     /// Destination folder
     #[arg(short, long)]
     dst: Option<PathBuf>,
+
+    /// Bonus prefix(es) (comma-separated): searched and saved if found, but never
+    /// keep the run alive.
+    #[arg(long, value_delimiter(','))]
+    bonus: Vec<String>,
+
+    /// Stop collecting a prefix after this many matches.
+    #[arg(long, default_value_t = 1)]
+    count: u64,
 }
 
 fn main() {
     let args = Args::parse();
-
-    let max_len = args.prefix.iter().map(|s| s.len()).max().unwrap_or(0);
-    let prefixes: Vec<String> = args.prefix;
     let dst = args.dst.unwrap_or_else(|| std::env::current_dir().unwrap());
     assert!(dst.is_dir(), "dst must be a directory");
+    assert!(args.count >= 1, "--count must be at least 1");
 
-    let (send, recv) = crossbeam_channel::unbounded();
-    let (send_tries, recv_tries) = crossbeam_channel::bounded(1);
-    cuda_try_loop(&prefixes, send, send_tries).unwrap();
+    // Required prefixes first, then bonus; `required[i]` tracks which is which.
+    let n_required = args.prefix.len();
+    let mut prefixes: Vec<String> = args.prefix;
+    prefixes.extend(args.bonus.iter().cloned());
+    let required: Vec<bool> = (0..prefixes.len()).map(|i| i < n_required).collect();
 
-    std::thread::spawn(move || {
-        let now = Instant::now();
-        let mut last_log = Instant::now();
-        let mut tries = 0_f64;
-        let expected = 2_f64.powi(5 * max_len as i32);
-        loop {
-            tries += recv_tries.recv().unwrap() as f64;
-            let dur = now.elapsed().as_secs_f64();
-            let dur_pretty =
-                PrettyDur(chrono::Duration::from_std(Duration::from_secs_f64(dur)).unwrap());
-            let progress = tries / expected;
-            let expected_dur = dur / progress;
-            let expected_dur_pretty = PrettyDur(
-                chrono::Duration::from_std(Duration::from_secs_f64(expected_dur)).unwrap(),
-            );
-            if last_log.elapsed() > Duration::from_secs(30) {
-                println!("Tried {:.0} / {:.0} (expected) keys.", tries, expected);
-                println!(
-                    "Running for {} / {} (expected).",
-                    dur_pretty, expected_dur_pretty
-                );
-                last_log = Instant::now();
-            }
-        }
+    rustacuda::init(rustacuda::CudaFlags::empty()).expect("failed to init CUDA");
+    let n_devices = rustacuda::device::Device::num_devices().expect("failed to enumerate devices");
+    if n_devices == 0 {
+        eprintln!("No cuda devices available.");
+        std::process::exit(2);
+    }
+
+    let shared = Arc::new(Shared {
+        start: Instant::now(),
+        found: prefixes.iter().map(|_| AtomicU64::new(0)).collect(),
+        prefixes,
+        required,
+        target: args.count,
+        devices: (0..n_devices)
+            .map(|_| DeviceStat {
+                keys: AtomicU64::new(0),
+            })
+            .collect(),
+        done: AtomicBool::new(false),
     });
 
-    loop {
-        use std::io::Write;
+    let (found_tx, found_rx) = crossbeam_channel::unbounded::<(usize, [u8; 32])>();
+    cuda_try_loop(shared.clone(), found_tx).unwrap();
 
-        let seed = recv.recv().unwrap();
+    // Reporter owns all stdout (live dashboard on a TTY, periodic lines otherwise).
+    let (log_tx, log_rx) = crossbeam_channel::unbounded::<String>();
+    let reporter_handle = {
+        let shared = shared.clone();
+        std::thread::spawn(move || reporter(shared, log_rx))
+    };
+
+    // Persist one match and notify the reporter. Drops matches for prefixes already
+    // collected to target.
+    let save = |idx: usize, seed: [u8; 32]| {
+        if shared.satisfied(idx) {
+            return;
+        }
         let esk: ed25519_dalek::ExpandedSecretKey =
             (&ed25519_dalek::SecretKey::from_bytes(&seed).unwrap()).into();
         let pk: ed25519_dalek::PublicKey = (&esk).into();
         let onion = pubkey_to_onion(pk.as_bytes());
-        println!("{}", onion);
-        let mut f = std::fs::File::create(dst.join(onion)).unwrap();
+        let mut f = std::fs::File::create(dst.join(&onion)).unwrap();
         f.write_all(FILE_PREFIX).unwrap();
         f.write_all(&esk.to_bytes()).unwrap();
         f.flush().unwrap();
+
+        let n = shared.found[idx].fetch_add(1, Ordering::Relaxed) + 1;
+        let tag = if shared.required[idx] { "" } else { " (bonus)" };
+        log_tx
+            .send(format!(
+                "✔ {}  matched \"{}\"{}  [{}/{}]",
+                onion, shared.prefixes[idx], tag, n, shared.target
+            ))
+            .ok();
+        if n >= shared.target {
+            log_tx
+                .send(format!("★ \"{}\" satisfied", shared.prefixes[idx]))
+                .ok();
+        }
+    };
+
+    // Writer loop: persist found keys; stop once every required prefix is satisfied.
+    loop {
+        let (idx, seed) = found_rx.recv().unwrap();
+        save(idx, seed);
+
+        if shared.required_satisfied() {
+            // A bonus match found in the same GPU batch may be queued behind the
+            // final required key — save those before exiting.
+            while let Ok((idx, seed)) = found_rx.try_recv() {
+                save(idx, seed);
+            }
+            break;
+        }
+    }
+
+    // Tell the reporter to render its last frame and exit, then print the summary.
+    shared.done.store(true, Ordering::Relaxed);
+    drop(log_tx);
+    let _ = reporter_handle.join();
+
+    let elapsed = shared.start.elapsed().as_secs_f64();
+    println!(
+        "Done — all required prefixes found in {} ({} keys tried).",
+        fmt_clock(elapsed),
+        human(shared.total_keys() as f64)
+    );
+    for (i, p) in shared.prefixes.iter().enumerate() {
+        let n = shared.found[i].load(Ordering::Relaxed);
+        let kind = if shared.required[i] { "required" } else { "bonus" };
+        let mark = if n > 0 { "✔" } else { "·" };
+        println!("  {} {:<18} {:>8}  found {}/{}", mark, p, kind, n, shared.target);
+    }
+    println!("Keys written to {}", dst.display());
+}
+
+// ----------------------------- reporting -----------------------------
+
+fn reporter(shared: Arc<Shared>, log_rx: crossbeam_channel::Receiver<String>) {
+    if std::io::stdout().is_terminal() {
+        reporter_tty(shared, log_rx);
+    } else {
+        reporter_plain(shared, log_rx);
+    }
+}
+
+/// Live, in-place dashboard for interactive terminals.
+fn reporter_tty(shared: Arc<Shared>, log_rx: crossbeam_channel::Receiver<String>) {
+    let n = shared.devices.len();
+    let mut out = std::io::stdout();
+    let mut prev_lines = 0usize;
+
+    let mut last_total = 0u64;
+    let mut last_dev = vec![0u64; n];
+    let mut last_t = Instant::now();
+    let mut inst_rate = 0.0f64;
+    let mut dev_rate = vec![0.0f64; n];
+
+    loop {
+        // Collect found-key notifications to emit as permanent scrollback.
+        let mut logs: Vec<String> = Vec::new();
+        let mut finished = false;
+        match log_rx.recv_timeout(Duration::from_millis(1000)) {
+            Ok(m) => {
+                logs.push(m);
+                while let Ok(m) = log_rx.try_recv() {
+                    logs.push(m);
+                }
+            }
+            Err(crossbeam_channel::RecvTimeoutError::Timeout) => {}
+            Err(crossbeam_channel::RecvTimeoutError::Disconnected) => finished = true,
+        }
+        finished |= shared.done.load(Ordering::Relaxed);
+
+        // Recompute rates on a multi-second window with EMA smoothing. Keys arrive in
+        // large per-launch chunks, so a short window aliases badly between GPUs.
+        const WINDOW: f64 = 3.0;
+        const ALPHA: f64 = 0.4;
+        let now = Instant::now();
+        let dt = now.duration_since(last_t).as_secs_f64();
+        let total = shared.total_keys();
+        if dt >= WINDOW {
+            let ema = |prev: f64, raw: f64| if prev <= 0.0 { raw } else { ALPHA * raw + (1.0 - ALPHA) * prev };
+            inst_rate = ema(inst_rate, total.saturating_sub(last_total) as f64 / dt);
+            for i in 0..n {
+                let k = shared.devices[i].keys.load(Ordering::Relaxed);
+                dev_rate[i] = ema(dev_rate[i], k.saturating_sub(last_dev[i]) as f64 / dt);
+                last_dev[i] = k;
+            }
+            last_total = total;
+            last_t = now;
+        }
+
+        if prev_lines > 0 {
+            let _ = write!(out, "\x1b[{}A\r\x1b[J", prev_lines);
+        }
+        for l in &logs {
+            let _ = writeln!(out, "{}", l);
+        }
+        let status = render_status(&shared, total, inst_rate, &dev_rate);
+        let _ = write!(out, "{}", status);
+        prev_lines = status.matches('\n').count();
+        let _ = out.flush();
+
+        if finished {
+            let _ = writeln!(out);
+            return;
+        }
+    }
+}
+
+/// Non-TTY fallback: append-only status lines (safe to pipe to a file).
+fn reporter_plain(shared: Arc<Shared>, log_rx: crossbeam_channel::Receiver<String>) {
+    let mut last = Instant::now();
+    let mut last_total = 0u64;
+    loop {
+        match log_rx.recv_timeout(Duration::from_secs(1)) {
+            Ok(m) => {
+                println!("{}", m);
+                while let Ok(m) = log_rx.try_recv() {
+                    println!("{}", m);
+                }
+            }
+            Err(crossbeam_channel::RecvTimeoutError::Timeout) => {}
+            Err(crossbeam_channel::RecvTimeoutError::Disconnected) => return,
+        }
+        if shared.done.load(Ordering::Relaxed) {
+            return;
+        }
+        if last.elapsed() >= Duration::from_secs(30) {
+            let elapsed = shared.start.elapsed().as_secs_f64();
+            let total = shared.total_keys();
+            let inst = total.saturating_sub(last_total) as f64 / last.elapsed().as_secs_f64();
+            let avg = if elapsed > 0.0 { total as f64 / elapsed } else { 0.0 };
+            println!(
+                "[{}] {} keys · {} (avg {})",
+                fmt_clock(elapsed),
+                human(total as f64),
+                human_rate(inst),
+                human_rate(avg)
+            );
+            for (i, p) in shared.prefixes.iter().enumerate() {
+                let exp = 2f64.powi(5 * p.len() as i32);
+                let prog = total as f64 / exp * 100.0;
+                let eta = if avg > 0.0 {
+                    (exp - total as f64).max(0.0) / avg
+                } else {
+                    f64::INFINITY
+                };
+                println!(
+                    "    {:<18} found {:>4}  {:>10}  ETA {}",
+                    p,
+                    shared.found[i].load(Ordering::Relaxed),
+                    fmt_pct(prog),
+                    fmt_eta(eta)
+                );
+            }
+            last = Instant::now();
+            last_total = total;
+        }
+    }
+}
+
+fn render_status(shared: &Shared, total: u64, inst_rate: f64, dev_rate: &[f64]) -> String {
+    let elapsed = shared.start.elapsed().as_secs_f64();
+    let avg = if elapsed > 0.0 { total as f64 / elapsed } else { 0.0 };
+    let n = shared.devices.len();
+
+    let mut s = String::new();
+    let _ = writeln!(s, "\x1b[1mtor-v3-vanity\x1b[0m · {}×GPU · {}", n, fmt_clock(elapsed));
+    let _ = writeln!(
+        s,
+        "{} keys · {} (avg {})",
+        human(total as f64),
+        human_rate(inst_rate),
+        human_rate(avg)
+    );
+    let _ = writeln!(s);
+    let _ = writeln!(
+        s,
+        "\x1b[1m{:<22}{:>7}{:>13}{:>10}\x1b[0m",
+        "PREFIX", "FOUND", "PROGRESS", "ETA"
+    );
+    for (i, p) in shared.prefixes.iter().enumerate() {
+        let exp = 2f64.powi(5 * p.len() as i32);
+        let prog = total as f64 / exp * 100.0;
+        let found = shared.found[i].load(Ordering::Relaxed);
+        let satisfied = shared.satisfied(i);
+        let name = if shared.required[i] {
+            trunc(p, 22)
+        } else {
+            trunc(&format!("{} (bonus)", p), 22)
+        };
+        let found_col = format!("{}/{}", found, shared.target);
+        let (prog_col, eta_col) = if satisfied {
+            ("✔".to_string(), "done".to_string())
+        } else {
+            let eta = if avg > 0.0 {
+                (exp - total as f64).max(0.0) / avg
+            } else {
+                f64::INFINITY
+            };
+            (fmt_pct(prog), fmt_eta(eta))
+        };
+        let _ = writeln!(s, "{:<22}{:>7}{:>13}{:>10}", name, found_col, prog_col, eta_col);
+    }
+    let _ = writeln!(s);
+    let _ = writeln!(s, "\x1b[1m{:>3}{:>13}\x1b[0m", "GPU", "RATE");
+    for i in 0..n {
+        let _ = writeln!(
+            s,
+            "{:>3}{:>13}",
+            i,
+            human_rate(dev_rate.get(i).copied().unwrap_or(0.0))
+        );
+    }
+    if s.ends_with('\n') {
+        s.pop();
+    }
+    s
+}
+
+fn human(n: f64) -> String {
+    const UNITS: [&str; 7] = ["", "K", "M", "G", "T", "P", "E"];
+    let mut v = n;
+    let mut i = 0;
+    while v >= 1000.0 && i < UNITS.len() - 1 {
+        v /= 1000.0;
+        i += 1;
+    }
+    if i == 0 {
+        format!("{:.0}", v)
+    } else {
+        format!("{:.2} {}", v, UNITS[i])
+    }
+}
+
+fn human_rate(kps: f64) -> String {
+    format!("{}/s", human(kps))
+}
+
+fn fmt_pct(p: f64) -> String {
+    if p >= 0.001 {
+        format!("{:.3}%", p)
+    } else if p > 0.0 {
+        format!("{:.2e}%", p)
+    } else {
+        "0%".to_string()
+    }
+}
+
+fn fmt_eta(secs: f64) -> String {
+    if !secs.is_finite() || secs <= 0.0 {
+        return "—".to_string();
+    }
+    if secs < 90.0 {
+        format!("{:.0}s", secs)
+    } else if secs < 5400.0 {
+        format!("{:.0}m", secs / 60.0)
+    } else if secs < 172_800.0 {
+        format!("{:.1}h", secs / 3600.0)
+    } else if secs < 31_536_000.0 {
+        format!("{:.1}d", secs / 86_400.0)
+    } else {
+        format!("{:.1}y", secs / 31_536_000.0)
+    }
+}
+
+fn fmt_clock(secs: f64) -> String {
+    let t = secs as u64;
+    format!("{:02}:{:02}:{:02}", t / 3600, (t % 3600) / 60, t % 60)
+}
+
+fn trunc(s: &str, n: usize) -> String {
+    if s.len() <= n {
+        s.to_string()
+    } else {
+        format!("{}…", &s[..n - 1])
     }
 }

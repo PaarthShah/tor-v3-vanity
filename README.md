@@ -96,3 +96,42 @@ On my 1070ti, I get the following time estimates:
 |             7 | 5 days     |
 |             8 | 22.5 weeks |
 |             9 | 14 years   |
+
+## Live dashboard
+
+On an interactive terminal the run shows a live, in-place dashboard with overall and
+per-GPU throughput and a per-prefix progress/ETA table:
+
+```
+tor-v3-vanity · 8×GPU · 00:05:23
+14.20 G keys · 92.30 M/s (avg 91.04 M/s)
+
+PREFIX                  FOUND     PROGRESS       ETA
+shaonsen                  1/1            ✔      done
+paarthshah                0/1      1.26e-3%     147d
+shaonsenllc (bonus)       0/1      3.94e-5%    12.8y
+
+GPU            RATE
+  0      11.60 M/s
+  1      11.55 M/s
+  ...
+```
+
+Found keys are printed above the dashboard and written to the destination folder.
+Per-prefix ETAs are shown individually, so a short prefix that will land soon isn't
+hidden behind the hardest one. When stdout is not a TTY, it falls back to plain
+status lines every 30s.
+
+## Required vs bonus prefixes
+
+Positional prefixes are **required**: the run exits as soon as every one is found.
+Prefixes passed with **`--bonus`** are searched the whole time and saved if they turn
+up, but never keep the run alive on their own:
+
+```bash
+t3v --dst mykeys/ shaonsen --bonus shaonsenllc
+```
+
+The moment `shaonsen` is found, t3v writes whatever it collected, prints a summary,
+and exits — it won't grind for years just for the bonus. Use **`--count N`** to
+collect N matches of a prefix before considering it satisfied (default 1).

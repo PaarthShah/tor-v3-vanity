@@ -21,11 +21,9 @@ path = "src/main.rs"
 [dependencies]
 anyhow = "1"
 base32 = "0.4"
-chrono = "0.4"
 clap = { version = "4", features = ["derive"] }
 crossbeam-channel = "0.5"
 ed25519-dalek = "1.0.0-pre.4"
-num_cpus = "1"
 rand = "0.8"
 rustacuda = "0.1.2"
 sha3 = "0.10"
