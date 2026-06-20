@@ -130,17 +130,17 @@ While running, an interactive terminal shows a **live dashboard** that updates i
 place:
 
 ```
-tor-v3-vanity · 8×GPU · 00:05:23
-14.20 G keys · 92.30 M/s (avg 91.04 M/s)
+tor-v3-vanity · 8×GPU · 00:13:29
+6.14 T keys · 7.47 G/s (avg 7.59 G/s)
 
 PREFIX                  FOUND     PROGRESS       ETA
-shaonsen                  1/1            ✔      done
-paarthshah                0/1      1.26e-3%     147d
-shaonsenllc (bonus)       0/1      3.94e-5%    12.8y
+qm4xkv27dhz               0/1       0.017%     54.9d
+tz7npq4ksb                0/1       0.546%     41.0h
 
 GPU     ITERS         RATE
-  0      2048    11.60 M/s
-  1      2048    11.55 M/s
+  0      8192   970.73 M/s
+  1      8192   888.17 M/s
+  2      8192   888.19 M/s
   ...
 ```
 
