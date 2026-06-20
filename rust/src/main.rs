@@ -39,12 +39,16 @@ impl BytePrefixOwned {
             &format!("{}aa", s),
         )
         .expect("prefix must be base32");
-        let mut last_byte_idx = 5 * s.len() / 8 - 1;
+        // Number of fully-constrained bytes, plus a mask for the partial trailing
+        // byte when the prefix doesn't end on a byte boundary (0 = byte-aligned, e.g.
+        // any prefix whose length is a multiple of 8).
+        let last_byte_idx = 5 * s.len() / 8;
         let n_bits = (5 * s.len()) % 8;
-        let last_byte_mask = ((1 << n_bits) - 1) << (8 - n_bits);
-        if last_byte_mask > 0 {
-            last_byte_idx += 1;
-        }
+        let last_byte_mask = if n_bits > 0 {
+            ((1u8 << n_bits) - 1) << (8 - n_bits)
+        } else {
+            0
+        };
         let gpu_byte_prefix = rustacuda::memory::DeviceBuffer::from_slice(&byte_prefix).unwrap();
         let out = [0; 32];
         let gpu_out = rustacuda::memory::DeviceBuffer::from_slice(&out).unwrap();

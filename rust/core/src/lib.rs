@@ -29,10 +29,16 @@ pub struct BytePrefix {
     pub success: DevicePointer<bool>,
 }
 impl BytePrefix {
+    /// `last_byte_idx` is the number of fully-constrained leading bytes; when the
+    /// prefix doesn't end on a byte boundary, `last_byte_mask` constrains the high
+    /// bits of the next byte (mask 0 = byte-aligned prefix, no partial byte).
     pub fn matches(&self, data: &[u8]) -> bool {
         let slice =
             unsafe { core::slice::from_raw_parts(self.byte_prefix.as_raw(), self.byte_prefix_len) };
-        data.starts_with(&slice[..self.last_byte_idx])
-            && data[self.last_byte_idx] & self.last_byte_mask == slice[self.last_byte_idx]
+        if !data.starts_with(&slice[..self.last_byte_idx]) {
+            return false;
+        }
+        self.last_byte_mask == 0
+            || data[self.last_byte_idx] & self.last_byte_mask == slice[self.last_byte_idx]
     }
 }
