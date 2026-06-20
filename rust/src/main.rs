@@ -74,9 +74,14 @@ fn assert_crypto_rng<Rng: rand::CryptoRng>(rng: Rng) -> Rng {
     rng
 }
 
-/// Lock-free telemetry shared between the GPU workers and the reporter.
+/// Live, lock-free telemetry shared between the GPU worker threads and the reporter.
 struct DeviceStat {
+    /// Cumulative keys this device has tried.
     keys: AtomicU64,
+    /// Keygens per thread per launch this device settled on (after autotune).
+    iters: AtomicU64,
+    /// True while the device is still autotuning `iters`.
+    calibrating: AtomicBool,
 }
 
 struct Shared {
@@ -86,6 +91,7 @@ struct Shared {
     required: Vec<bool>,
     /// Matches to collect per prefix before it's considered satisfied.
     target: u64,
+    /// Per-prefix count of matches found so far.
     found: Vec<AtomicU64>,
     devices: Vec<DeviceStat>,
     /// Set once all required prefixes are satisfied; tells the reporter to finalize.
@@ -104,15 +110,18 @@ impl Shared {
         self.found[i].load(Ordering::Relaxed) >= self.target
     }
 
+    /// True once every *required* prefix has reached its target count.
     fn required_satisfied(&self) -> bool {
         (0..self.prefixes.len()).all(|i| !self.required[i] || self.satisfied(i))
     }
 }
 
-/// Spawn one worker thread per CUDA device, each looping forever generating keys.
+/// Spawn one worker thread per CUDA device. Each thread autotunes its per-launch
+/// `iters` for throughput, then loops forever generating keys.
 fn cuda_try_loop(
     shared: Arc<Shared>,
     found_tx: crossbeam_channel::Sender<(usize, [u8; 32])>,
+    forced_iters: Option<u64>,
 ) -> Result<()> {
     use rustacuda::launch;
     use rustacuda::memory::DeviceBox;
@@ -131,14 +140,17 @@ fn cuda_try_loop(
                 Context::create_and_push(ContextFlags::MAP_HOST | ContextFlags::SCHED_AUTO, device)
                     .unwrap();
 
+            // Load PTX module
             let module_data = CString::new(include_str!(env!("KERNEL_PTX_PATH"))).unwrap();
             let kernel = Module::load_from_string(&module_data).unwrap();
             let function = kernel
                 .get_function(std::ffi::CStr::from_bytes_with_nul(b"render\0").unwrap())
                 .unwrap();
 
+            // Create a stream to submit work to
             let stream = Stream::new(StreamFlags::NON_BLOCKING, None).unwrap();
 
+            // Move seed and prefixes to device
             let mut seed = [0; 32];
             let mut gpu_seed = DeviceBuffer::from_slice(&seed).unwrap();
 
@@ -156,10 +168,11 @@ fn cuda_try_loop(
                 seed: gpu_seed.as_device_ptr(),
                 byte_prefixes: gpu_byte_prefixes.as_device_ptr(),
                 byte_prefixes_len: gpu_byte_prefixes.len(),
+                iters: 1,
             })
             .unwrap();
 
-            // Block size from an occupancy/register heuristic.
+            // calculate threads and blocks (occupancy heuristic)
             let fn_max_threads = function
                 .get_attribute(rustacuda::function::FunctionAttribute::MaxThreadsPerBlock)
                 .unwrap() as u32;
@@ -185,9 +198,86 @@ fn cuda_try_loop(
             .min()
             .unwrap();
             let blocks = gpu_cores * gpu_max_threads / threads;
-            let keys_per_launch = threads as u64 * blocks as u64;
+            let grid = threads as u64 * blocks as u64;
 
             let stat = &shared.devices[i];
+
+            // Autotune iters: throughput rises with iters then plateaus, so climb by
+            // doubling until the gain is <2% or a launch exceeds the wall-time cap.
+            let iters = if let Some(forced) = forced_iters {
+                forced
+            } else {
+                const CAP_MS: f64 = 750.0;
+                const CEILING: u64 = 1 << 22;
+
+                // Measure throughput (keys/s) and mean launch time (ms) at `iters`.
+                let mut measure = |iters: u64, rounds: u32| -> (f64, f64) {
+                    params
+                        .copy_from(&core::KernelParams {
+                            seed: gpu_seed.as_device_ptr(),
+                            byte_prefixes: gpu_byte_prefixes.as_device_ptr(),
+                            byte_prefixes_len: gpu_byte_prefixes.len(),
+                            iters,
+                        })
+                        .unwrap();
+                    let t0 = Instant::now();
+                    for _ in 0..rounds {
+                        csprng.fill_bytes(&mut seed);
+                        gpu_seed.copy_from(&seed).unwrap();
+                        unsafe {
+                            launch!(kernel.render<<<blocks, threads, 0, stream>>>(
+                                params.as_device_ptr()
+                            ))
+                            .unwrap();
+                        }
+                        stream.synchronize().unwrap();
+                    }
+                    let secs = t0.elapsed().as_secs_f64();
+                    let kps = (grid * iters * rounds as u64) as f64 / secs;
+                    // Count the warm-up work toward the live total too.
+                    stat.keys.fetch_add(grid * iters * rounds as u64, Ordering::Relaxed);
+                    (kps, secs / rounds as f64 * 1000.0)
+                };
+
+                let mut cur = 16u64;
+                let (mut cur_kps, _) = measure(cur, 3);
+                loop {
+                    let cand = cur.saturating_mul(2);
+                    if cand >= CEILING {
+                        break;
+                    }
+                    let (kps, ms) = measure(cand, 2);
+                    if ms > CAP_MS {
+                        if kps > cur_kps {
+                            cur = cand;
+                        }
+                        break;
+                    }
+                    if kps > cur_kps * 1.02 {
+                        cur = cand;
+                        cur_kps = kps;
+                    } else {
+                        if kps > cur_kps {
+                            cur = cand;
+                        }
+                        break;
+                    }
+                }
+                cur
+            };
+
+            params
+                .copy_from(&core::KernelParams {
+                    seed: gpu_seed.as_device_ptr(),
+                    byte_prefixes: gpu_byte_prefixes.as_device_ptr(),
+                    byte_prefixes_len: gpu_byte_prefixes.len(),
+                    iters,
+                })
+                .unwrap();
+            stat.iters.store(iters, Ordering::Relaxed);
+            stat.calibrating.store(false, Ordering::Relaxed);
+
+            let keys_per_launch = grid * iters;
             loop {
                 csprng.fill_bytes(&mut seed);
                 gpu_seed.copy_from(&seed).unwrap();
@@ -195,6 +285,8 @@ fn cuda_try_loop(
                     launch!(kernel.render<<<blocks, threads, 0, stream>>>(params.as_device_ptr()))
                         .unwrap();
                 }
+
+                // The kernel launch is asynchronous, so we wait for it to finish.
                 stream.synchronize().unwrap();
 
                 for (idx, prefix) in byte_prefixes_owned.iter_mut().enumerate() {
@@ -220,7 +312,7 @@ const FILE_PREFIX: &'static [u8] = b"== ed25519v1-secret: type0 ==\0\0\0";
 #[derive(clap::Parser)]
 #[command(name = "t3v")]
 struct Args {
-    /// Required prefix(es) (comma-separated). The run exits once all are found.
+    /// Required prefix(es) (comma-separated). The run exits once all of these are found.
     #[arg(required = true, value_delimiter(','))]
     prefix: Vec<String>,
 
@@ -229,7 +321,8 @@ struct Args {
     dst: Option<PathBuf>,
 
     /// Bonus prefix(es) (comma-separated): searched and saved if found, but never
-    /// keep the run alive.
+    /// keep the run alive. Useful for a longer "nice-to-have" prefix you'll grab
+    /// only if it happens to turn up while searching for the required ones.
     #[arg(long, value_delimiter(','))]
     bonus: Vec<String>,
 
@@ -266,13 +359,21 @@ fn main() {
         devices: (0..n_devices)
             .map(|_| DeviceStat {
                 keys: AtomicU64::new(0),
+                iters: AtomicU64::new(0),
+                calibrating: AtomicBool::new(true),
             })
             .collect(),
         done: AtomicBool::new(false),
     });
 
+    // T3V_ITERS pins iters and skips autotune (handy for benchmarking).
+    let forced_iters = std::env::var("T3V_ITERS")
+        .ok()
+        .and_then(|v| v.parse::<u64>().ok())
+        .filter(|&v| v > 0);
+
     let (found_tx, found_rx) = crossbeam_channel::unbounded::<(usize, [u8; 32])>();
-    cuda_try_loop(shared.clone(), found_tx).unwrap();
+    cuda_try_loop(shared.clone(), found_tx, forced_iters).unwrap();
 
     // Reporter owns all stdout (live dashboard on a TTY, periodic lines otherwise).
     let (log_tx, log_rx) = crossbeam_channel::unbounded::<String>();
@@ -281,8 +382,8 @@ fn main() {
         std::thread::spawn(move || reporter(shared, log_rx))
     };
 
-    // Persist one match and notify the reporter. Drops matches for prefixes already
-    // collected to target.
+    // Persist one match and notify the reporter. Drops matches for prefixes we've
+    // already collected enough of (idempotent past the target count).
     let save = |idx: usize, seed: [u8; 32]| {
         if shared.satisfied(idx) {
             return;
@@ -311,14 +412,15 @@ fn main() {
         }
     };
 
-    // Writer loop: persist found keys; stop once every required prefix is satisfied.
+    // Writer loop: persist found keys and stop once every required prefix is
+    // satisfied. Bonus prefixes are saved opportunistically but don't gate exit.
     loop {
         let (idx, seed) = found_rx.recv().unwrap();
         save(idx, seed);
 
         if shared.required_satisfied() {
-            // A bonus match found in the same GPU batch may be queued behind the
-            // final required key — save those before exiting.
+            // A bonus match found in the same GPU batch as the final required key
+            // may be queued right behind it — save those before exiting.
             while let Ok((idx, seed)) = found_rx.try_recv() {
                 save(idx, seed);
             }
@@ -326,7 +428,10 @@ fn main() {
         }
     }
 
-    // Tell the reporter to render its last frame and exit, then print the summary.
+    // Finalize: tell the reporter to render its last frame and exit, then print a
+    // summary below it. Dropping our log sender unblocks the reporter immediately.
+    // `save` borrows log_tx only by shared ref and isn't used past here, so the
+    // borrow is already released; dropping log_tx now disconnects the channel.
     shared.done.store(true, Ordering::Relaxed);
     drop(log_tx);
     let _ = reporter_handle.join();
@@ -369,7 +474,7 @@ fn reporter_tty(shared: Arc<Shared>, log_rx: crossbeam_channel::Receiver<String>
     let mut dev_rate = vec![0.0f64; n];
 
     loop {
-        // Collect found-key notifications to emit as permanent scrollback.
+        // Collect any found-key notifications to emit as permanent scrollback.
         let mut logs: Vec<String> = Vec::new();
         let mut finished = false;
         match log_rx.recv_timeout(Duration::from_millis(1000)) {
@@ -384,8 +489,8 @@ fn reporter_tty(shared: Arc<Shared>, log_rx: crossbeam_channel::Receiver<String>
         }
         finished |= shared.done.load(Ordering::Relaxed);
 
-        // Recompute rates on a multi-second window with EMA smoothing. Keys arrive in
-        // large per-launch chunks, so a short window aliases badly between GPUs.
+        // Rates on a multi-second window with EMA smoothing: keys arrive in large
+        // per-launch chunks, so a short window aliases badly between GPUs.
         const WINDOW: f64 = 3.0;
         const ALPHA: f64 = 0.4;
         let now = Instant::now();
@@ -403,6 +508,7 @@ fn reporter_tty(shared: Arc<Shared>, log_rx: crossbeam_channel::Receiver<String>
             last_t = now;
         }
 
+        // Erase the previous status block, emit logs above the redrawn block.
         if prev_lines > 0 {
             let _ = write!(out, "\x1b[{}A\r\x1b[J", prev_lines);
         }
@@ -415,6 +521,7 @@ fn reporter_tty(shared: Arc<Shared>, log_rx: crossbeam_channel::Receiver<String>
         let _ = out.flush();
 
         if finished {
+            // Leave the final frame on screen and move below it for the summary.
             let _ = writeln!(out);
             return;
         }
@@ -479,7 +586,12 @@ fn render_status(shared: &Shared, total: u64, inst_rate: f64, dev_rate: &[f64]) 
     let n = shared.devices.len();
 
     let mut s = String::new();
-    let _ = writeln!(s, "\x1b[1mtor-v3-vanity\x1b[0m · {}×GPU · {}", n, fmt_clock(elapsed));
+    let _ = writeln!(
+        s,
+        "\x1b[1mtor-v3-vanity\x1b[0m · {}×GPU · {}",
+        n,
+        fmt_clock(elapsed)
+    );
     let _ = writeln!(
         s,
         "{} keys · {} (avg {})",
@@ -517,15 +629,22 @@ fn render_status(shared: &Shared, total: u64, inst_rate: f64, dev_rate: &[f64]) 
         let _ = writeln!(s, "{:<22}{:>7}{:>13}{:>10}", name, found_col, prog_col, eta_col);
     }
     let _ = writeln!(s);
-    let _ = writeln!(s, "\x1b[1m{:>3}{:>13}\x1b[0m", "GPU", "RATE");
+    let _ = writeln!(s, "\x1b[1m{:>3}{:>10}{:>13}\x1b[0m", "GPU", "ITERS", "RATE");
     for i in 0..n {
-        let _ = writeln!(
-            s,
-            "{:>3}{:>13}",
-            i,
-            human_rate(dev_rate.get(i).copied().unwrap_or(0.0))
-        );
+        let st = &shared.devices[i];
+        if st.calibrating.load(Ordering::Relaxed) {
+            let _ = writeln!(s, "{:>3}{:>10}{:>13}", i, "—", "tuning…");
+        } else {
+            let _ = writeln!(
+                s,
+                "{:>3}{:>10}{:>13}",
+                i,
+                st.iters.load(Ordering::Relaxed),
+                human_rate(dev_rate.get(i).copied().unwrap_or(0.0))
+            );
+        }
     }
+    // No trailing newline: the line count then equals the cursor-up distance.
     if s.ends_with('\n') {
         s.pop();
     }

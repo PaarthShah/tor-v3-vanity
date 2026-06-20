@@ -111,12 +111,13 @@ shaonsen                  1/1            ✔      done
 paarthshah                0/1      1.26e-3%     147d
 shaonsenllc (bonus)       0/1      3.94e-5%    12.8y
 
-GPU            RATE
-  0      11.60 M/s
-  1      11.55 M/s
+GPU     ITERS         RATE
+  0      2048    11.60 M/s
+  1      2048    11.55 M/s
   ...
 ```
 
+On startup each GPU autotunes its per-launch batch size (`ITERS`) for throughput.
 Found keys are printed above the dashboard and written to the destination folder.
 Per-prefix ETAs are shown individually, so a short prefix that will land soon isn't
 hidden behind the hardest one. When stdout is not a TTY, it falls back to plain
@@ -135,3 +136,12 @@ t3v --dst mykeys/ shaonsen --bonus shaonsenllc
 The moment `shaonsen` is found, t3v writes whatever it collected, prints a summary,
 and exits — it won't grind for years just for the bonus. Use **`--count N`** to
 collect N matches of a prefix before considering it satisfied (default 1).
+
+## Performance tuning
+
+- **`T3V_ITERS`** (runtime env var) — pins the per-launch batch size and skips
+  autotune; handy for benchmarking a specific value, e.g. `T3V_ITERS=1024 t3v myprefix`.
+- **`KERNEL_TARGET_CPU`** (build-time env var, default `sm_90` for Hopper/H100) — the
+  compute capability the PTX kernel is compiled for. PTX is JIT-compiled to the
+  installed GPU at load, so the default is forward-compatible; override for older
+  cards, e.g. `KERNEL_TARGET_CPU=sm_75 make amd64`.

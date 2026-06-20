@@ -52,6 +52,14 @@ fn main() {
     }
     println!("cargo:rerun-if-changed=core");
     println!("cargo:rerun-if-env-changed=KERNEL_PTX_PATH");
+    println!("cargo:rerun-if-env-changed=KERNEL_TARGET_CPU");
+
+    // GPU compute capability to compile the kernel PTX for. Defaults to sm_90
+    // (Hopper / H100). The driver JITs PTX to the installed GPU at load time, so
+    // this is forward-compatible; override (e.g. KERNEL_TARGET_CPU=sm_75) for
+    // older cards.
+    let target_cpu = env::var("KERNEL_TARGET_CPU").unwrap_or_else(|_| "sm_90".into());
+    let target_cpu_flag = format!("-Ctarget-cpu={}", target_cpu);
 
     let manifest_dir = PathBuf::from(env::var("CARGO_MANIFEST_DIR").unwrap());
     let target_dir = env::var("CARGO_TARGET_DIR")
@@ -83,8 +91,7 @@ fn main() {
             "link-self-contained=+linker",
             "-C",
             "linker-flavor=llbc",
-            "-C",
-            "target-cpu=sm_75",
+            target_cpu_flag.as_str(),
         ])
         .env("CARGO_TARGET_DIR", &kernel_target_dir)
         .current_dir(&manifest_dir)

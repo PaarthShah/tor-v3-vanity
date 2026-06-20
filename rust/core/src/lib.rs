@@ -13,6 +13,9 @@ pub struct KernelParams {
     pub seed: DevicePointer<u8>,
     pub byte_prefixes: DevicePointer<BytePrefix>,
     pub byte_prefixes_len: usize,
+    /// Number of keygen iterations each thread performs per launch (grid-stride).
+    /// Amortizes launch/sync/host round-trip overhead across many keys.
+    pub iters: u64,
 }
 
 #[derive(DeviceCopy, Clone)]
