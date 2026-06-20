@@ -97,6 +97,25 @@ On my 1070ti, I get the following time estimates:
 |             8 | 22.5 weeks |
 |             9 | 14 years   |
 
+### 8× H100, incremental algorithm
+
+Measured on an 8×H100 node with `--algo incremental` (the default): roughly
+**7 G keys/s** (≈0.9 G/s per H100) — about **75×** the original seed kernel, which does
+~95 M keys/s on the same box. Expected (mean) time to land a prefix:
+
+| Prefix Length | Expected time |
+| ------------- | ------------- |
+|             6 | < 1 second    |
+|             7 | ~5 seconds    |
+|             8 | ~2.5 minutes  |
+|             9 | ~1.5 hours    |
+|            10 | ~2 days       |
+|            11 | ~2 months     |
+|            12 | ~5 years      |
+
+Throughput scales with GPU count and varies with contention; each extra character is
+32× the work.
+
 ## Performance & live dashboard
 
 The program automatically spawns one worker thread per CUDA device and uses every
@@ -152,13 +171,18 @@ matches of each prefix before considering it satisfied (default 1).
 
 There are two GPU kernels:
 
-- **`--algo incremental`** (default) — mkp224o-style: each thread computes one
-  `A = a·B`, then enumerates `A, A+B, A+2B, …` by point addition (the secret scalar
-  for step `k` is just `a+k`), with batched Montgomery inversion over a window.
-  **~30–38× faster** (≈3 G keys/s vs ≈95 M keys/s across 8×H100). Keys are stored as
-  the raw scalar; Tor uses it un-clamped, exactly like mkp224o.
+- **`--algo incremental`** (default) — each thread computes one `A = a·B`, then
+  enumerates `A, A+B, A+2B, …` by point addition (the secret scalar for step `k` is
+  just `a+k`), with batched Montgomery inversion over a window.
+  **~75× faster** (≈7 G keys/s vs ≈95 M keys/s across 8×H100). Keys are stored as the
+  raw scalar; Tor uses it un-clamped.
 - **`--algo seed`** — the original reference path: hash a fresh random seed per
   candidate, which costs a full scalar multiplication every time.
+
+The incremental algorithm is taken from [**mkp224o**](https://github.com/cathugger/mkp224o):
+enumerate keys by repeated basepoint addition with batched modular inversion, rather than a
+fresh scalar multiplication per candidate. mkp224o is the mature CPU implementation of this
+idea; the `incremental` kernel is a GPU port of it.
 
 The incremental path's field/point arithmetic is validated bit-for-bit against
 curve25519-dalek (`cargo run --example field_oracle`, `--example gpu_selftest`),
@@ -181,7 +205,8 @@ Tuning knobs:
 - **`T3V_ITERS`** (runtime env var) — pins keygens-per-launch and **skips autotune**.
   Useful for benchmarking a specific value, e.g. `T3V_ITERS=1024 t3v myprefix`.
 
-- **`KERNEL_TARGET_CPU`** (build-time env var, default `sm_90` for Hopper/H100) —
-  the compute capability the PTX kernel is compiled for. PTX is JIT-compiled to the
-  installed GPU by the driver at load time, so the default is forward-compatible.
-  Override for older cards, e.g. `KERNEL_TARGET_CPU=sm_75 make amd64`.
+- **`KERNEL_TARGET_CPU`** (build-time env var, default `sm_75`) — the *minimum*
+  compute capability the PTX kernel targets. PTX is JIT-compiled to the installed GPU
+  at load and the kernel uses no arch-specific instructions, so `sm_75` runs
+  everywhere from Turing up (including H100) at full speed. It's a minimum, so don't
+  raise it above your oldest GPU or the module won't load there.
